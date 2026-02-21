@@ -1,0 +1,31 @@
+aws_region: eu-central-1
+project_name: ansible-aws-infra
+env_name: dev
+
+# VPC CIDRs
+vpc_cidr: "10.20.0.0/16"
+public_subnets:
+  - {cidr: "10.20.0.0/24", az: "eu-central-1a", name: "public-subnet-1"}
+  - {cidr: "10.20.1.0/24", az: "eu-central-1b", name: "public-subnet-2"}
+private_subnets:
+  - {cidr: "10.20.2.0/24", az: "eu-central-1a", name: "private-subnet-1"}
+  - {cidr: "10.20.3.0/24", az: "eu-central-1b", name: "private-subnet-2"}
+
+# EC2
+bastion_instance_type: t3.micro
+web_instance_type: t3.micro
+db_instance_type: t3.micro
+
+# Ubuntu 22.04 LTS - SSM public parameter (region-specific lookup is safer, but this is fine as a start)
+ubuntu_ami_owner: "099720109477"
+ubuntu_ami_name: "ubuntu/images/hvm-ssd/ubuntu-22.04-amd64-server-*"
+
+# SSH keypair name in AWS
+ssh_key_name: "{{ project_name }}-{{ env_name }}-key"
+ssh_private_key_path: "{{ lookup('env', 'HOME') }}/.ssh/{{ ssh_key_name }}"
+
+# Tags
+common_tags:
+  Project: "{{ project_name }}"
+  Environment: "{{ env_name }}"
+  ManagedBy: "Ansible"
