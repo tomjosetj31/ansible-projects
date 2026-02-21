@@ -1,0 +1,11 @@
+# Only for private hosts. We'll set bastion public IP dynamically later,
+# but easiest is to tag bastion and fetch it via a small helper step.
+# For now, leave as placeholder; after provisioning we’ll populate it.
+
+bastion_public_ip: ""
+
+# Use ProxyJump for everything except bastion itself (we’ll override for bastion group later)
+ansible_ssh_common_args: >-
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ProxyJump=ubuntu@{{ bastion_public_ip }}

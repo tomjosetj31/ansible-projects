@@ -1,0 +1,23 @@
+plugin: amazon.aws.aws_ec2            # Use the AWS EC2 dynamic inventory plugin
+regions:                             # List of AWS regions to search for EC2 instances
+  - eu-central-1                     # Target region is EU (Frankfurt)
+
+# Use your AWS profile from env var AWS_PROFILE (recommended)
+# Or rely on default credentials chain.
+keyed_groups:                        # Create groups based on tags for organization
+  - key: tags.Role                   # Group hosts by their Role tag (e.g., role_web)
+    prefix: role                     # Prefix for role groups
+  - key: tags.Environment            # Group hosts by their Environment tag (e.g., env_dev)
+    prefix: env                      # Prefix for environment groups
+
+filters:                             # Filter EC2 instances based on tags
+  tag:Project: ansible-aws-infra     # Only include instances with Project: ansible-aws-infra
+  tag:Environment: dev               # Only include instances with Environment: dev
+
+hostnames:                           # Define which attributes to use for inventory hostnames
+  - private-ip-address               # Try private IP address first
+  - dns-name                         # Then fall back to DNS name if available
+
+compose:                             # Additional inventory variables to assign to each host
+  ansible_user: ubuntu               # Default SSH user to connect as
+  ansible_host: private_ip_address   # Use private_ip_address for ansible_host
