@@ -1,0 +1,252 @@
+# Main playbook to provision AWS VPC networking and EC2 instances (bastion, web, db)
+- name: Provision AWS networking + EC2 (bastion, web, db)
+  hosts: localhost     # Execute tasks on localhost
+  connection: local    # Use local connection since we're managing AWS resources via API
+  gather_facts: false  # Skip fact gathering (not needed for localhost/AWS API)
+
+  vars_files:
+    - ../group_vars/all/main.yml   # Load main variables (region, subnets, etc.)
+    - ../group_vars/all/vault.yml  # Load secret variables (from Ansible Vault)
+
+  tasks:
+    # Create a new VPC
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: "{{ project_name }}-{{ env_name }}-vpc"    # VPC name
+        cidr_block: "{{ vpc_cidr }}"                     # CIDR block to use
+        region: "{{ aws_region }}"                       # AWS region
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-vpc'}) }}"  # Resource tags
+      register: vpc    # Save output to variable
+
+    # Create an Internet Gateway for the VPC
+    - name: Create Internet Gateway
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc.vpc.id }}"             # Attach to just-created VPC
+        region: "{{ aws_region }}"              # Region
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-igw'}) }}"  # Tag the IGW
+      register: igw                            # Save output
+
+    # Loop: Create public subnets for each defined public subnet
+    - name: Create public subnets
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc.vpc.id }}"             # VPC to attach subnet to
+        cidr: "{{ item.cidr }}"                # Subnet's CIDR block
+        az: "{{ item.az }}"                    # Availability Zone
+        region: "{{ aws_region }}"             # Region
+        map_public: true                       # Mark as public (auto-assign public IPs on launch)
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-' ~ item.name, 'Tier': 'public'}) }}"
+      loop: "{{ public_subnets }}"             # Loop over each public subnet entry
+      register: pub_subnets                    # Save results
+
+    # Loop: Create private subnets for each defined private subnet
+    - name: Create private subnets
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc.vpc.id }}"             # VPC to attach subnet to
+        cidr: "{{ item.cidr }}"                # Subnet's CIDR block
+        az: "{{ item.az }}"                    # Availability Zone
+        region: "{{ aws_region }}"             # Region
+        map_public: false                      # Don't auto-assign public IPs
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-' ~ item.name, 'Tier': 'private'}) }}"
+      loop: "{{ private_subnets }}"            # Loop over private subnets
+      register: priv_subnets                   # Save results
+
+    # Allocate an Elastic IP for the NAT Gateway (for private subnets' outbound internet access)
+    - name: Allocate EIP for NAT Gateway
+      amazon.aws.ec2_eip:
+        region: "{{ aws_region }}"             # Region
+        in_vpc: true                          # Allocate for use in VPC (NAT Gateway)
+        state: present                        # Ensure EIP exists
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-nat-eip'}) }}"
+      register: nat_eip                       # Save EIP resource info
+
+    # Create the NAT Gateway in the first public subnet
+    - name: Create NAT Gateway in first public subnet
+      amazon.aws.ec2_vpc_nat_gateway:
+        region: "{{ aws_region }}"                         # Region
+        subnet_id: "{{ pub_subnets.results[0].subnet.id }}" # Place in first public subnet
+        allocation_id: "{{ nat_eip.allocation_id }}"        # Use the allocated EIP
+        state: present                                     # Ensure created
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-nat'}) }}"
+        wait: true                                         # Wait until ready
+      register: nat                                        # Save NAT Gateway info
+
+    # Create a route table for public subnets that routes 0.0.0.0/0 via the IGW
+    - name: Public route table (to IGW)
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"                        # VPC id
+        region: "{{ aws_region }}"                        # Region
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-rt-public'}) }}"
+        subnets: "{{ pub_subnets.results | map(attribute='subnet.id') | list }}"  # Associate with public subnets
+        routes:
+          - dest: "0.0.0.0/0"                             # Default route
+            gateway_id: "{{ igw.gateway_id }}"            # Set as IGW
+      register: rt_public                                 # Save output
+
+    # Create route table for private subnets that routes 0.0.0.0/0 via the NAT Gateway
+    - name: Private route table (to NAT)
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"                        # VPC id
+        region: "{{ aws_region }}"                        # Region
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-rt-private'}) }}"
+        subnets: "{{ priv_subnets.results | map(attribute='subnet.id') | list }}"  # Associate with all private subnets
+        routes:
+          - dest: "0.0.0.0/0"                              # Default route
+            nat_gateway_id: "{{ nat.nat_gateway_id }}"     # Route through NAT Gateway for outbound internet
+      register: rt_private                                 # Save output
+
+    # Create a security group for bastion host (SSH from anywhere, egress anywhere)
+    - name: Create Security Group - bastion
+      amazon.aws.ec2_security_group:
+        name: "{{ project_name }}-{{ env_name }}-sg-bastion"                    # SG name
+        description: Bastion SG                                                 # SG description
+        vpc_id: "{{ vpc.vpc.id }}"                                              # In the new VPC
+        region: "{{ aws_region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: "0.0.0.0/0"   # Allow SSH from anywhere (should restrict for prod!)
+        rules_egress:
+          - proto: -1
+            cidr_ip: "0.0.0.0/0"   # Allow all outbound
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-sg-bastion'}) }}"
+      register: sg_bastion
+
+    # Create security group for web servers: allow SSH from bastion SG, HTTP from anywhere
+    - name: Create Security Group - web
+      amazon.aws.ec2_security_group:
+        name: "{{ project_name }}-{{ env_name }}-sg-web"                        # SG name
+        description: Web SG                                                     # SG description
+        vpc_id: "{{ vpc.vpc.id }}"                                              # In the new VPC
+        region: "{{ aws_region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            group_id: "{{ sg_bastion.group_id }}"    # Allow SSH from bastion SG
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: "0.0.0.0/0"                    # Allow HTTP from anywhere
+        rules_egress:
+          - proto: -1
+            cidr_ip: "0.0.0.0/0"                    # Allow all outbound
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-sg-web'}) }}"
+      register: sg_web
+
+    # Create security group for DB: SSH from bastion, PostgreSQL from web SG
+    - name: Create Security Group - db
+      amazon.aws.ec2_security_group:
+        name: "{{ project_name }}-{{ env_name }}-sg-db"                         # SG name
+        description: DB SG                                                      # SG description
+        vpc_id: "{{ vpc.vpc.id }}"                                              # In the new VPC
+        region: "{{ aws_region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            group_id: "{{ sg_bastion.group_id }}"   # Allow SSH from bastion
+          - proto: tcp
+            from_port: 5432
+            to_port: 5432
+            group_id: "{{ sg_web.group_id }}"       # Allow DB connections from web SG
+        rules_egress:
+          - proto: -1
+            cidr_ip: "0.0.0.0/0"                    # Allow all outbound
+        tags: "{{ common_tags | combine({'Name': project_name ~ '-' ~ env_name ~ '-sg-db'}) }}"
+      register: sg_db
+
+    # Ensure the required EC2 SSH key pair exists (create if missing)
+    - name: Ensure EC2 key pair exists (and save private key locally if newly created)
+      amazon.aws.ec2_key:
+        name: "{{ ssh_key_name }}"                   # KeyPair name
+        region: "{{ aws_region }}"                   # Region
+        state: present                              # Create if doesn't exist
+      register: keypair
+
+    # Save the private key to local disk if we just created it
+    - name: Save private key locally (only when created)
+      copy:
+        dest: "{{ ssh_private_key_path }}"           # Where to save locally
+        content: "{{ keypair.key.private_key }}"     # The private key itself (from AWS result)
+        mode: "0600"                                # File permissions
+      when: keypair.changed                         # Only run if new key created
+
+    # Find the latest available Ubuntu Server AMI in this region
+    - name: Find latest Ubuntu AMI
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"                  # Region
+        owners: ["{{ ubuntu_ami_owner }}"]          # Owner (official Ubuntu)
+        filters:
+          name: "{{ ubuntu_ami_name }}"             # AMI name pattern
+          virtualization-type: hvm                  # Must be an HVM AMI
+          root-device-type: ebs                     # Use EBS root
+      register: ami
+
+    # Choose the newest Ubuntu AMI by creation date (for launching EC2)
+    - name: Pick newest AMI
+      set_fact:
+        ubuntu_ami_id: "{{ (ami.images | sort(attribute='creation_date'))[-1].image_id }}"
+
+    # Launch a public bastion EC2 instance for SSH access
+    - name: Launch bastion (public subnet)
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"                                  # Region
+        name: "{{ project_name }}-{{ env_name }}-bastion"           # Name instance
+        key_name: "{{ ssh_key_name }}"                              # SSH key
+        instance_type: "{{ bastion_instance_type }}"                # Instance size/type
+        image_id: "{{ ubuntu_ami_id }}"                             # AMI to use
+        vpc_subnet_id: "{{ pub_subnets.results[0].subnet.id }}"     # Subnet (public)
+        network:
+          assign_public_ip: true                                    # Public IP for SSH
+        security_group: "{{ sg_bastion.group_id }}"                 # Bastion SG
+        tags: "{{ common_tags | combine({'Role': 'bastion'}) }}"    # Add Role tag
+        state: running                                              # Ensure running
+        wait: true                                                  # Wait until ready
+      register: bastion                                             # Save resource info
+
+    # Launch 2 web server EC2s, one in each private subnet
+    - name: Launch 2 web servers (private subnets)
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"                                  # Region
+        key_name: "{{ ssh_key_name }}"                              # SSH key
+        instance_type: "{{ web_instance_type }}"                    # Instance size/type
+        image_id: "{{ ubuntu_ami_id }}"                             # Ubuntu AMI
+        vpc_subnet_id: "{{ item }}"                                 # Each subnet id (loop)
+        network:
+          assign_public_ip: false                                   # Private only
+        security_group: "{{ sg_web.group_id }}"                     # Web SG
+        tags: "{{ common_tags | combine({'Role': 'web'}) }}"        # Add Role tag for web
+        state: running                                              # Ensure running
+        wait: true                                                  # Wait until ready
+        count: 1                                                   # One per subnet
+      loop: "{{ priv_subnets.results[0:2] | map(attribute='subnet.id') | list }}" # For first two priv subnets
+      register: web_instances                                       # Save resource info
+
+    # Launch the DB server in the first private subnet
+    - name: Launch DB server (private subnet)
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"                                  # Region
+        key_name: "{{ ssh_key_name }}"                              # SSH key
+        instance_type: "{{ db_instance_type }}"                     # DB instance type
+        image_id: "{{ ubuntu_ami_id }}"                             # Ubuntu AMI
+        vpc_subnet_id: "{{ priv_subnets.results[0].subnet.id }}"    # First private subnet
+        network:
+          assign_public_ip: false                                   # Private only
+        security_group: "{{ sg_db.group_id }}"                      # DB SG
+        tags: "{{ common_tags | combine({'Role': 'db'}) }}"         # Add Role tag
+        state: running                                              # Ensure running
+        wait: true                                                  # Wait until ready
+      register: db_instance                                         # Save output
+
+    # Print bastion instance public IP to Ansible output
+    - name: Show bastion public IP
+      debug:
+        msg: "Bastion public IP: {{ bastion.instances[0].public_ip_address }}"
+
+    # Write the public IP of the provisioned bastion to the dev inventory (for future SSH/config)
+    - name: Write bastion_public_ip to dev group_vars
+      lineinfile:
+        path: "../inventories/dev/group_vars/all.yml"                                  # File to edit
+        regexp: '^bastion_public_ip:'                                                  # Look for this line
+        line: "bastion_public_ip: \"{{ bastion.instances[0].public_ip_address }}\""    # Replace with current IP

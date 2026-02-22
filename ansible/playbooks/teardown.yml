@@ -1,0 +1,35 @@
+- name: Tear down AWS infra for this project/env   # Main play to tear down AWS infrastructure
+  hosts: localhost                                # Run tasks locally (not on remote hosts)
+  connection: local                               # Use local connection method (no SSH)
+  gather_facts: false                             # Don't gather Ansible facts (not needed)
+
+  vars_files:
+    - ../group_vars/all/main.yml                  # Load required variables from this vars file
+
+  tasks:
+    - name: Terminate instances by tag            # Task: Remove EC2 instances based on project/env tags
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"                # AWS region to operate in
+        filters:
+          "tag:Project": "{{ project_name }}"     # Filter EC2s with this Project tag
+          "tag:Environment": "{{ env_name }}"     # ... and this Environment tag
+        state: absent                            # Ensure instances matching filter are terminated
+        wait: true                               # Wait until instance is fully terminated
+
+    - name: Find VPC                             # Task: Lookup VPC with our project/env tags
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ aws_region }}"               # AWS region to search in
+        filters:
+          "tag:Project": "{{ project_name }}"    # Filter for Project tag
+          "tag:Environment": "{{ env_name }}"    # Filter for Environment tag
+      register: vpcs                             # Save result as variable 'vpcs'
+
+    - name: Stop if no VPC found                 # Task: End play if no VPC exists for those tags
+      meta: end_play
+      when: vpcs.vpcs | length == 0              # Only end if our filtered search returns nothing
+
+    - name: Delete VPC (will fail if dependencies remain; we’ll handle iteratively later)  # Try to remove VPC if found
+      amazon.aws.ec2_vpc_net:
+        region: "{{ aws_region }}"               # AWS region for operation
+        vpc_id: "{{ vpcs.vpcs[0].id }}"          # Use the ID of the first VPC found
+        state: absent                            # Ensure VPC is deleted (will fail if dependencies remain)
