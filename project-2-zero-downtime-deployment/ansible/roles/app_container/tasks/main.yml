@@ -1,0 +1,74 @@
+- name: Capture current running image (if any)
+  become: true
+  ansible.builtin.shell: |
+    docker inspect -f '{{ "{{" }}.Config.Image{{ "}}" }}' {{ container_name }} 2>/dev/null || true
+  register: current_image
+  changed_when: false
+
+- name: Set previous image fact
+  ansible.builtin.set_fact:
+    previous_image: "{{ current_image.stdout | default('') }}"
+
+- name: Pull target image
+  become: true
+  ansible.builtin.command: "docker pull {{ image_full }}"
+  register: pull_result
+
+- name: Stop and remove existing container (if exists)
+  become: true
+  ansible.builtin.shell: |
+    docker rm -f {{ container_name }} 2>/dev/null || true
+  changed_when: false
+
+- name: Run container
+  become: true
+  ansible.builtin.shell: |
+    docker run -d --name {{ container_name }} \
+      --restart unless-stopped \
+      -p {{ host_port }}:{{ container_port }} \
+      {% for k,v in vault_app_env.items() %}
+      -e {{ k }}='{{ v }}' \
+      {% endfor %}
+      {{ image_full }}
+  register: run_result
+
+- name: Wait for app health
+  ansible.builtin.uri:
+    url: "{{ health_url }}"
+    status_code: 200
+  register: health
+  retries: 20
+  delay: 2
+  until: health.status == 200
+
+# Rollback block if health check fails
+- name: Rollback to previous image if health failed
+  become: true
+  block:
+    - name: Ensure previous image exists
+      ansible.builtin.fail:
+        msg: "Health check failed and no previous image found to rollback to."
+      when: previous_image | length == 0
+
+    - name: Pull previous image
+      ansible.builtin.command: "docker pull {{ previous_image }}"
+      when: previous_image | length > 0
+
+    - name: Remove failed container
+      ansible.builtin.shell: "docker rm -f {{ container_name }} 2>/dev/null || true"
+      changed_when: false
+
+    - name: Run previous container image
+      ansible.builtin.shell: |
+        docker run -d --name {{ container_name }} \
+          --restart unless-stopped \
+          -p {{ host_port }}:{{ container_port }} \
+          {% for k,v in vault_app_env.items() %}
+          -e {{ k }}='{{ v }}' \
+          {% endfor %}
+          {{ previous_image }}
+
+    - name: Fail deployment after rollback
+      ansible.builtin.fail:
+        msg: "Deployment failed healthcheck on {{ inventory_hostname }}. Rolled back to {{ previous_image }}."
+  when: health is failed
