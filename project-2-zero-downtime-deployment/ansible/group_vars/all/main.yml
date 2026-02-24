@@ -26,3 +26,6 @@ health_delay: 2
 use_alb_draining: false
 alb_target_group_arn: ""
 alb_port: 80
+
+# Container env vars (override in vault.yml with vault_app_env: { "KEY": "value", ... })
+vault_app_env: {}

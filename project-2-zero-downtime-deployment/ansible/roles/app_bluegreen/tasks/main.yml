@@ -1,0 +1,132 @@
+- name: Ensure app state directory exists
+  become: true
+  ansible.builtin.file:
+    path: "/opt/{{ app_name }}"
+    state: directory
+    mode: "0755"
+
+- name: Read active slot (blue/green) if exists
+  become: true
+  ansible.builtin.slurp:
+    src: "/opt/{{ app_name }}/active_slot"
+  register: active_slot_file
+  failed_when: false
+  changed_when: false
+
+- name: Set active_slot fact (default blue)
+  ansible.builtin.set_fact:
+    active_slot: >-
+      {{
+        (active_slot_file.content | default('') | b64decode | trim)
+        if (active_slot_file is defined and active_slot_file.content is defined)
+        else 'blue'
+      }}
+
+- name: Compute ports and container names
+  ansible.builtin.set_fact:
+    active_port: "{{ blue_port if active_slot == 'blue' else green_port }}"
+    inactive_slot: "{{ 'green' if active_slot == 'blue' else 'blue' }}"
+    inactive_port: "{{ green_port if active_slot == 'blue' else blue_port }}"
+    active_container: "{{ app_name }}-{{ active_slot }}"
+    inactive_container: "{{ app_name }}-{{ inactive_slot }}"
+    app_env: "{{ vault_app_env | default({}) }}"
+
+- name: Pull target image
+  become: true
+  ansible.builtin.command: "docker pull {{ image_full }}"
+
+- name: Stop and remove inactive container (safe to replace)
+  become: true
+  ansible.builtin.shell: "docker rm -f {{ inactive_container }} 2>/dev/null || true"
+  changed_when: false
+
+- name: Start new version on inactive slot (candidate)
+  become: true
+  ansible.builtin.shell: |
+    docker run -d --name {{ inactive_container }} \
+      --restart unless-stopped \
+      -p 127.0.0.1:{{ inactive_port }}:{{ container_internal_port }} \
+      {% for k,v in app_env.items() %}
+      -e {{ k }}='{{ v }}' \
+      {% endfor %}
+      {{ image_full }}
+
+- name: Health check candidate slot directly
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ inactive_port }}{{ health_path }}"
+    status_code: 200
+  register: candidate_health
+  retries: "{{ health_retries }}"
+  delay: "{{ health_delay }}"
+  until: candidate_health.status == 200
+
+# Switch traffic by updating Nginx upstream (instant), then reload nginx
+- name: Switch Nginx upstream to candidate port
+  become: true
+  ansible.builtin.template:
+    src: "upstream.conf.j2"
+    dest: "/etc/nginx/conf.d/{{ app_name }}_upstream.conf"
+    mode: "0644"
+  vars:
+    active_port: "{{ inactive_port }}"
+  notify: Reload nginx
+
+- name: Reload nginx now
+  become: true
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+
+- name: Update active slot file
+  become: true
+  ansible.builtin.copy:
+    dest: "/opt/{{ app_name }}/active_slot"
+    content: "{{ inactive_slot }}\n"
+    mode: "0644"
+
+# Optional: stop old container after successful cutover
+- name: Stop old active container (optional cleanup)
+  become: true
+  ansible.builtin.shell: "docker rm -f {{ active_container }} 2>/dev/null || true"
+  changed_when: false
+
+# Final health check via nginx (what users see); rollback on failure
+- name: Verify deployment via nginx and rollback on failure
+  block:
+    - name: Health check via nginx (public path)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_listen_port }}{{ health_path }}"
+        status_code: 200
+      register: live_health
+      retries: "{{ health_retries }}"
+      delay: "{{ health_delay }}"
+      until: live_health.status == 200
+  rescue:
+    - name: Rollback - Switch Nginx upstream back to previous active port
+      become: true
+      ansible.builtin.template:
+        src: "upstream.conf.j2"
+        dest: "/etc/nginx/conf.d/{{ app_name }}_upstream.conf"
+        mode: "0644"
+      vars:
+        active_port: "{{ active_port }}"
+      notify: Reload nginx
+
+    - name: Flush handlers so nginx reload runs before we continue
+      ansible.builtin.meta: flush_handlers
+
+    - name: Rollback - Restore active slot file
+      become: true
+      ansible.builtin.copy:
+        dest: "/opt/{{ app_name }}/active_slot"
+        content: "{{ active_slot }}\n"
+        mode: "0644"
+
+    - name: Rollback - Remove failed candidate container
+      become: true
+      ansible.builtin.shell: "docker rm -f {{ inactive_container }} 2>/dev/null || true"
+      changed_when: false
+
+    - name: Fail after rollback
+      ansible.builtin.fail:
+        msg: "Blue/Green deployment failed on {{ inventory_hostname }}. Rolled back to {{ active_slot }}."

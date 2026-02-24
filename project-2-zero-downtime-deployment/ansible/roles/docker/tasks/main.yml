@@ -1,4 +1,4 @@
-- name: Install Prerequisites
+- name: Install prerequisites
   become: true
   ansible.builtin.apt:
     name:
