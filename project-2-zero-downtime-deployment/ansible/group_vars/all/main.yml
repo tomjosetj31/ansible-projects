@@ -1,25 +1,28 @@
 app_name: myapp
 
-# ECR
 aws_region: ap-south-1
 ecr_registry: "123456789012.dkr.ecr.ap-south-1.amazonaws.com"
 ecr_repo: "myapp"
 
-# Image tag should come from CI (git sha). You can also pass it via -e image_tag=...
+# supplied by CI or CLI: -e image_tag=...
 image_tag: "latest"
 image_full: "{{ ecr_registry }}/{{ ecr_repo }}:{{ image_tag }}"
 
-# Container
-container_name: "{{ app_name }}"
-container_port: 8000         # app container listens on this
-host_port: 8000              # host binds to this
-health_url: "http://127.0.0.1:{{ host_port }}/health"
+# blue/green slots
+blue_port: 8000
+green_port: 8001
+container_internal_port: 8000  # the port your app listens on INSIDE the container
 
-# Optional: Nginx as reverse proxy on port 80 -> 8000
-use_nginx: true
+# Nginx (public)
 nginx_server_name: "_"
+nginx_listen_port: 80
 
-# Optional: ALB draining
+# Health
+health_path: "/health"
+health_retries: 20
+health_delay: 2
+
+# Optional ALB draining (enable later if you confirm ALB)
 use_alb_draining: false
-alb_target_group_arn: ""      # fill if you want ALB draining
-alb_port: 80                  # target group port (often 80)
+alb_target_group_arn: ""
+alb_port: 80
