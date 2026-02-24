@@ -1,0 +1,51 @@
+- name: Install nginx
+  become: true
+  ansible.builtin.apt:
+    name: nginx
+    update_cache: true
+    state: present
+
+- name: Ensure upstream include directory exists
+  become: true
+  ansible.builtin.file:
+    path: "/etc/nginx/conf.d"
+    state: directory
+    mode: "0755"
+
+# Default active_port if not set yet (first deploy)
+- name: Default active_port to blue if undefined
+  ansible.builtin.set_fact:
+    active_port: "{{ blue_port }}"
+  when: active_port is not defined
+
+- name: Write upstream config
+  become: true
+  ansible.builtin.template:
+    src: upstream.conf.j2
+    dest: "/etc/nginx/conf.d/{{ app_name }}_upstream.conf"
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Write site config
+  become: true
+  ansible.builtin.template:
+    src: site.conf.j2
+    dest: "/etc/nginx/sites-available/{{ app_name }}.conf"
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable site config
+  become: true
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ app_name }}.conf"
+    dest: "/etc/nginx/sites-enabled/{{ app_name }}.conf"
+    state: link
+    force: true
+  notify: Reload nginx
+
+- name: Disable default site
+  become: true
+  ansible.builtin.file:
+    path: "/etc/nginx/sites-enabled/default"
+    state: absent
+  notify: Reload nginx

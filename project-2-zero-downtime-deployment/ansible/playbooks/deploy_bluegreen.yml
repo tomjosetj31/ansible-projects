@@ -1,0 +1,20 @@
+- name: Blue/Green rolling deploy of docker app
+  hosts: role_web
+  serial: 1
+  any_errors_fatal: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all/main.yml
+    - ../group_vars/all/vault.yml
+
+  pre_tasks:
+    - name: Show what we’re deploying
+      ansible.builtin.debug:
+        msg: "Deploying {{ image_full }} to {{ inventory_hostname }}"
+
+  roles:
+    - docker
+    - ecr_login
+    - nginx
+    - app_bluegreen

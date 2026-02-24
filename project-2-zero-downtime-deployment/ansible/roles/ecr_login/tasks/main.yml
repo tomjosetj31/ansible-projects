@@ -1,0 +1,13 @@
+- name: Install AWS CLI (if missing)
+  become: true
+  ansible.builtin.apt:
+    name: awscli
+    update_cache: true
+    state: present
+
+- name: Login to ECR (Docker)
+  become: true
+  ansible.builtin.shell: |
+    aws ecr get-login-password --region {{ aws_region }} \
+    | docker login --username AWS --password-stdin {{ ecr_registry }}
+  changed_when: false

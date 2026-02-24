@@ -1,0 +1,31 @@
+app_name: myapp
+
+aws_region: ap-south-1
+ecr_registry: "123456789012.dkr.ecr.ap-south-1.amazonaws.com"
+ecr_repo: "myapp"
+
+# supplied by CI or CLI: -e image_tag=...
+image_tag: "latest"
+image_full: "{{ ecr_registry }}/{{ ecr_repo }}:{{ image_tag }}"
+
+# blue/green slots
+blue_port: 8000
+green_port: 8001
+container_internal_port: 8000  # the port your app listens on INSIDE the container
+
+# Nginx (public)
+nginx_server_name: "_"
+nginx_listen_port: 80
+
+# Health
+health_path: "/health"
+health_retries: 20
+health_delay: 2
+
+# Optional ALB draining (enable later if you confirm ALB)
+use_alb_draining: false
+alb_target_group_arn: ""
+alb_port: 80
+
+# Container env vars (override in vault.yml with vault_app_env: { "KEY": "value", ... })
+vault_app_env: {}
