@@ -1,0 +1,28 @@
+- name: Initialize Kubernetes master
+  become: true
+  command: kubeadm init --pod-network-cidr=192.168.0.0/16
+  register: kubeadm_init
+
+- name: Create kube config directory
+  become: true
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+
+- name: Copy kubeconfig
+  become: true
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: yes
+    owner: ubuntu
+
+- name: Generate join command
+  become: true
+  command: kubeadm token create --print-join-command
+  register: join_cmd
+
+- name: Save join command
+  set_fact:
+    k8s_join_command: "{{ join_cmd.stdout }}"
