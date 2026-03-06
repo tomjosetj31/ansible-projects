@@ -1,0 +1,16 @@
+- name: Initialize master
+  hosts: role_k8s_master
+  become: true
+  roles:
+    - k8s_master
+
+- name: Join workers
+  hosts: role_k8s_worker
+  become: true
+  roles:
+    - k8s_worker
+
+- name: Install CNI
+  hosts: role_k8s_master
+  roles:
+    - k8s_network

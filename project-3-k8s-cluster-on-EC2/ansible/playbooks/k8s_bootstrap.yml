@@ -1,0 +1,6 @@
+- name: Install Kubernetes dependencies
+  hosts: role_k8s_master:role_k8s_worker
+  become: true
+
+  roles:
+    - k8s_common

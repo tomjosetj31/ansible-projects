@@ -1,0 +1,27 @@
+- name: Disable swap
+  become: true
+  command: swapoff -a
+
+- name: Install containerd
+  become: true
+  apt:
+    name: containerd
+    state: present
+    update_cache: yes
+
+- name: Enable containerd
+  become: true
+  service:
+    name: containerd
+    state: started
+    enabled: yes
+
+- name: Install kube packages
+  become: true
+  apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: yes

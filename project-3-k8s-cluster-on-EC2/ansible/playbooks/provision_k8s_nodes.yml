@@ -1,0 +1,37 @@
+- name: Provision Kubernetes nodes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    region: ap-south-1
+    instance_type: t3.medium
+    key_name: mykey
+
+  tasks:
+
+  - name: Create master node
+    amazon.aws.ec2_instance:
+      name: k8s-master
+      key_name: "{{ key_name }}"
+      instance_type: "{{ instance_type }}"
+      image_id: ami-xxxxxxxx
+      region: "{{ region }}"
+      count: 1
+      state: running
+      wait: true
+      tags:
+        Role: k8s_master
+
+  - name: Create worker nodes
+    amazon.aws.ec2_instance:
+      name: k8s-worker
+      key_name: "{{ key_name }}"
+      instance_type: "{{ instance_type }}"
+      image_id: ami-xxxxxxxx
+      region: "{{ region }}"
+      count: 2
+      state: running
+      wait: true
+      tags:
+        Role: k8s_worker
